@@ -44,7 +44,15 @@ The prefix file count and size-based handoff budgets honor the active
 
 | File | Content |
 |------|---------|
-| `.codemap/handoff.latest.json` | Full artifact (all layers) |
+| `.codemap/handoff.latest.json` | Full artifact (all layers), atomically renamed as the generation commit point |
 | `.codemap/handoff.prefix.json` | Stable prefix snapshot |
 | `.codemap/handoff.delta.json` | Dynamic delta snapshot |
-| `.codemap/handoff.metrics.log` | Append-only metrics stream |
+| `.codemap/handoff.metrics.log` | Metrics stream, rewritten atomically per commit and capped at 500 lines |
+
+All four outputs are published by one `handoff.Commit` entry point (used by the
+CLI, MCP and `session-stop`) under a cross-process lock: the whole generation
+is staged first and `handoff.latest.json` switches last, so readers only ever
+see a complete old or new generation. Concurrent commits serialize, agent
+session history is merged and deduplicated, and interrupted commits leave
+staging debris and stale locks that the next commit reclaims. Artifacts from
+older builds (no `generation` field) are adopted as the baseline generation.

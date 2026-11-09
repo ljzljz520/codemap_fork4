@@ -1089,9 +1089,11 @@ func handleGetHandoff(ctx context.Context, req *mcp.CallToolRequest, input Hando
 			return errorResult("Failed to build handoff: " + err.Error()), nil, nil
 		}
 		if input.Save {
-			// Persistence commit point: cancellation observed before WriteLatest
-			// prevents all writes. Once WriteLatest begins, its established
-			// non-contextual multi-file semantics remain unchanged.
+			// Persistence commit point: cancellation observed before the save
+			// prevents all writes. The save routes through handoff.Commit,
+			// which stages the whole generation under a cross-process lock and
+			// only switches handoff.latest.json once every output is staged,
+			// so readers never observe a partially written generation.
 			if cancelled := cancellationResult(ctx, "Handoff generation"); cancelled != nil {
 				return cancelled, nil, nil
 			}

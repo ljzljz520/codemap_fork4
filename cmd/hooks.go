@@ -1712,7 +1712,10 @@ func writeSessionHandoffContext(ctx context.Context, root string, state *watch.S
 		return err
 	}
 
-	// Record this agent session in handoff history
+	// Record this agent session in handoff history. Commit merges and
+	// deduplicates it with the generations already on disk under its
+	// cross-process lock, so concurrent session-stop hooks never overwrite
+	// each other's history.
 	agentEntry := handoff.AgentEntry{
 		AgentID:   detectAgentID(),
 		StartedAt: sessionStartTime(state),
@@ -1727,22 +1730,10 @@ func writeSessionHandoffContext(ctx context.Context, root string, state *watch.S
 			}
 		}
 	}
+	artifact.AgentHistory = []handoff.AgentEntry{agentEntry}
 
-	// Carry over history from previous artifact and append current session
-	if prev, err := handoff.ReadLatest(root); err == nil && prev != nil {
-		artifact.AgentHistory = prev.AgentHistory
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	artifact.AgentHistory = append(artifact.AgentHistory, agentEntry)
-
-	// Cap history to last 20 entries
-	if len(artifact.AgentHistory) > 20 {
-		artifact.AgentHistory = artifact.AgentHistory[len(artifact.AgentHistory)-20:]
-	}
-
-	return handoff.WriteLatest(root, artifact)
+	_, err = handoff.Commit(root, artifact)
+	return err
 }
 
 // detectAgentID returns the current AI agent based on environment signals.

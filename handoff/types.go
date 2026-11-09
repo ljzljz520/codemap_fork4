@@ -82,17 +82,21 @@ type AgentEntry struct {
 
 // Artifact is the persisted handoff payload shared between agents.
 type Artifact struct {
-	SchemaVersion int            `json:"schema_version"`
-	GeneratedAt   time.Time      `json:"generated_at"`
-	Root          string         `json:"root"`
-	Branch        string         `json:"branch"`
-	BaseRef       string         `json:"base_ref"`
-	Prefix        PrefixSnapshot `json:"prefix"`
-	Delta         DeltaSnapshot  `json:"delta"`
-	PrefixHash    string         `json:"prefix_hash"`
-	DeltaHash     string         `json:"delta_hash"`
-	CombinedHash  string         `json:"combined_hash"`
-	Metrics       CacheMetrics   `json:"metrics"`
+	SchemaVersion int `json:"schema_version"`
+	// Generation is the monotonically increasing commit sequence. A missing
+	// value (legacy artifacts written before atomic commits) reads as zero and
+	// is adopted as the baseline of the next Commit.
+	Generation   int64          `json:"generation,omitempty"`
+	GeneratedAt  time.Time      `json:"generated_at"`
+	Root         string         `json:"root"`
+	Branch       string         `json:"branch"`
+	BaseRef      string         `json:"base_ref"`
+	Prefix       PrefixSnapshot `json:"prefix"`
+	Delta        DeltaSnapshot  `json:"delta"`
+	PrefixHash   string         `json:"prefix_hash"`
+	DeltaHash    string         `json:"delta_hash"`
+	CombinedHash string         `json:"combined_hash"`
+	Metrics      CacheMetrics   `json:"metrics"`
 
 	// Agent history — tracks which agents have worked on this codebase.
 	AgentHistory []AgentEntry `json:"agent_history,omitempty"`

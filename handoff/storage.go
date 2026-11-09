@@ -2,11 +2,9 @@ package handoff
 
 import (
 	"bytes"
-	"encoding/json"
 	"os"
 	"path/filepath"
 
-	"codemap/internal/gitexclude"
 	"codemap/internal/projectpath"
 	"codemap/internal/runtimefile"
 )
@@ -59,53 +57,25 @@ func MetricsPath(root string) string {
 	return filepath.Join(absRoot, metricsFilename)
 }
 
-// ReadLatest reads the latest handoff artifact if it exists.
-// Returns (nil, nil) when no artifact is present.
+// ReadLatest reads the latest committed handoff artifact if it exists.
+// Because Commit renames handoff.latest.json as its single commit point and
+// the artifact embeds every layer, a successful read is always one complete
+// generation, never a mixture of generations. Returns (nil, nil) when no
+// artifact is present.
 func ReadLatest(root string) (*Artifact, error) {
-	path, err := runtimePath(root, latestFilename)
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, nil
-		}
-		return nil, err
-	}
-
-	var artifact Artifact
-	if err := json.Unmarshal(data, &artifact); err != nil {
-		return nil, err
-	}
-	normalizeArtifact(&artifact)
-
-	return &artifact, nil
-}
-
-// WriteLatest writes an artifact atomically to .codemap/handoff.latest.json.
-func WriteLatest(root string, artifact *Artifact) error {
-	normalizeArtifact(artifact)
-
 	runtimeDir, err := projectpath.CheckedRuntimeCodemapDir(root)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	path := filepath.Join(runtimeDir, latestFilename)
-	if err := gitexclude.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
+	return readCommittedAt(runtimeDir)
+}
 
-	if err := writeJSONAtomic(path, artifact); err != nil {
-		return err
-	}
-	if err := writeJSONAtomic(filepath.Join(runtimeDir, prefixFilename), artifact.Prefix); err != nil {
-		return err
-	}
-	if err := writeJSONAtomic(filepath.Join(runtimeDir, deltaFilename), artifact.Delta); err != nil {
-		return err
-	}
-	return appendMetricsAt(filepath.Join(runtimeDir, metricsFilename), artifact)
+// WriteLatest persists an artifact through Commit, the single atomic
+// generation entry point shared by the CLI, MCP and session-stop paths. It is
+// retained as a compatibility wrapper; new callers should use Commit directly.
+func WriteLatest(root string, artifact *Artifact) error {
+	_, err := Commit(root, artifact)
+	return err
 }
 
 func runtimePath(root, name string) (string, error) {
@@ -116,14 +86,11 @@ func runtimePath(root, name string) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
-func writeJSONAtomic(path string, value any) error {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	return runtimefile.WriteAtomic(path, data, 0o644)
-}
-
+// appendMetrics adds one metrics entry outside of a generation commit. The
+// log is read and rewritten atomically so concurrent appenders cannot
+// interleave or tear lines. Commit performs the equivalent rewrite while
+// holding the commit lock; this helper exists for standalone metrics tooling
+// and tests.
 func appendMetrics(root string, artifact *Artifact) error {
 	path, err := runtimePath(root, metricsFilename)
 	if err != nil {
@@ -133,39 +100,32 @@ func appendMetrics(root string, artifact *Artifact) error {
 }
 
 func appendMetricsAt(path string, artifact *Artifact) error {
-	entry := struct {
-		GeneratedAt  string       `json:"generated_at"`
-		Branch       string       `json:"branch"`
-		BaseRef      string       `json:"base_ref"`
-		PrefixHash   string       `json:"prefix_hash"`
-		DeltaHash    string       `json:"delta_hash"`
-		CombinedHash string       `json:"combined_hash"`
-		Metrics      CacheMetrics `json:"metrics"`
-	}{
-		GeneratedAt:  artifact.GeneratedAt.Format("2006-01-02T15:04:05Z07:00"),
-		Branch:       artifact.Branch,
-		BaseRef:      artifact.BaseRef,
-		PrefixHash:   artifact.PrefixHash,
-		DeltaHash:    artifact.DeltaHash,
-		CombinedHash: artifact.CombinedHash,
-		Metrics:      artifact.Metrics,
-	}
-
-	data, err := json.Marshal(entry)
+	line, err := marshalMetricsLine(artifact)
 	if err != nil {
 		return err
 	}
-
-	f, err := runtimefile.OpenAppend(path, 0o644)
-	if err != nil {
+	existing, err := runtimefile.Read(path)
+	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	defer f.Close()
 
-	if _, err := f.Write(append(data, '\n')); err != nil {
-		return err
+	lines := make([][]byte, 0, maxMetricsLines)
+	for _, raw := range bytes.Split(bytes.TrimSpace(existing), []byte("\n")) {
+		if len(raw) > 0 {
+			lines = append(lines, raw)
+		}
 	}
-	return capMetricsLogAt(path, maxMetricsLines)
+	lines = append(lines, bytes.TrimRight(line, "\n"))
+	if len(lines) > maxMetricsLines {
+		lines = lines[len(lines)-maxMetricsLines:]
+	}
+
+	var buf bytes.Buffer
+	for _, raw := range lines {
+		buf.Write(raw)
+		buf.WriteByte('\n')
+	}
+	return runtimefile.WriteAtomic(path, buf.Bytes(), 0o644)
 }
 
 func normalizeArtifact(artifact *Artifact) {
@@ -226,7 +186,7 @@ func mirrorDeltaToLegacy(artifact *Artifact) {
 		artifact.NextSteps = append([]string{}, artifact.Delta.NextSteps...)
 	}
 	if artifact.OpenQuestions == nil {
-		artifact.OpenQuestions = append([]string{}, artifact.Delta.OpenQuestions...)
+		artifact.OpenQuestions = append([]string{}, artifact.OpenQuestions...)
 	}
 }
 
@@ -244,31 +204,4 @@ func backfillHashes(artifact *Artifact) {
 	if artifact.CombinedHash == "" {
 		artifact.CombinedHash = hashFromStrings(artifact.PrefixHash, artifact.DeltaHash)
 	}
-}
-
-func capMetricsLogAt(path string, maxLines int) error {
-	if maxLines <= 0 {
-		return nil
-	}
-
-	data, err := runtimefile.Read(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
-		return err
-	}
-	data = bytes.TrimSpace(data)
-	if len(data) == 0 {
-		return nil
-	}
-
-	lines := bytes.Split(data, []byte("\n"))
-	if len(lines) <= maxLines {
-		return nil
-	}
-
-	trimmed := bytes.Join(lines[len(lines)-maxLines:], []byte("\n"))
-	trimmed = append(trimmed, '\n')
-	return runtimefile.WriteAtomic(path, trimmed, 0o644)
 }

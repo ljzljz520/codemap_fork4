@@ -183,4 +183,4 @@ Output and budget notes:
 
 Cancellation notes:
 - project scans, dependency graphs, ast-grep, Git diff/impact work, project discovery, and generated handoff/detail work stop with the MCP request context
-- with `save=true`, cancellation observed after generation but before persistence prevents `WriteLatest`; once persistence begins, the existing multi-file write completes or reports its existing error without rollback
+- with `save=true`, cancellation observed after generation but before persistence prevents the commit; persistence runs through the single `handoff.Commit` entry point, which stages the whole generation under a cross-process lock and only switches `handoff.latest.json` after the prefix, delta and metrics outputs are staged, so readers observe either the complete previous generation or the complete new one

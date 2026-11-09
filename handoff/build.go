@@ -150,6 +150,9 @@ func BuildContext(ctx context.Context, root string, opts BuildOptions) (*Artifac
 	}
 	combinedHash := hashFromStrings(prefixHash, deltaHash)
 
+	// Best-effort preview of the previous generation for the returned,
+	// possibly unsaved artifact. Commit ignores this value and recomputes
+	// reuse metrics under its lock against the generation actually on disk.
 	previous := opts.Previous
 	if previous == nil {
 		previous, _ = ReadLatest(absRoot)
